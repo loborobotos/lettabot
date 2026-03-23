@@ -5,7 +5,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci
 
-COPY tsconfig.json ./
 COPY . .
 RUN npm run build
 
@@ -37,7 +36,20 @@ ARG RAILWAY_VERSION=4.33.0
 RUN curl -fsSL "https://github.com/railwayapp/cli/releases/download/v${RAILWAY_VERSION}/railway-v${RAILWAY_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
       | tar -xz -C /usr/local/bin \
     && mv /usr/local/bin/railway /usr/local/bin/railway-bin \
-    && printf '#!/bin/sh\n\nif [ -z "$AGENT_ID" ]; then\n\n  echo "ERROR: AGENT_ID not set. Cannot verify authorization." >&2\n\n  exit 1\n\nfi\n\nif [ -z "$RAILWAY_ALLOWED_AGENTS" ]; then\n\n  echo "ERROR: RAILWAY_ALLOWED_AGENTS not set. No agents are authorized." >&2\n\n  exit 1\n\nfi\n\ncase ",$RAILWAY_ALLOWED_AGENTS," in\n\n  *",$AGENT_ID,"*) ;;\n\n  *) echo "ERROR: Agent $AGENT_ID is not authorized to use Railway CLI." >&2; exit 1 ;;\n\nesac\n\nexec railway-bin "$@"\n' > /usr/local/bin/railway \
+    && printf '#!/bin/sh\n\
+if [ -z "$AGENT_ID" ]; then\n\
+  echo "ERROR: AGENT_ID not set. Cannot verify authorization." >&2\n\
+  exit 1\n\
+fi\n\
+if [ -z "$RAILWAY_ALLOWED_AGENTS" ]; then\n\
+  echo "ERROR: RAILWAY_ALLOWED_AGENTS not set. No agents are authorized." >&2\n\
+  exit 1\n\
+fi\n\
+case ",$RAILWAY_ALLOWED_AGENTS," in\n\
+  *",$AGENT_ID,"*) ;;\n\
+  *) echo "ERROR: Agent $AGENT_ID is not authorized to use Railway CLI." >&2; exit 1 ;;\n\
+esac\n\
+exec railway-bin "$@"\n' > /usr/local/bin/railway \
     && chmod +x /usr/local/bin/railway
 
 ENV NODE_ENV=production
