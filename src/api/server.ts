@@ -7,7 +7,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import { readFile } from 'node:fs/promises';
 import * as crypto from 'node:crypto';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { validateApiKey } from './auth.js';
 import { loadSkillsFromDir } from '../skills/loader.js';
 import { resolveWorkingDirPath } from '../utils/paths.js';
@@ -906,6 +906,18 @@ export function createApiServer(deliverer: AgentRouter, options: ServerOptions):
       return raw.startsWith('~') ? resolveWorkingDirPath(raw) : raw;
     }
 
+    const SAFE_SKILL_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_\-. ]*$/;
+
+    function isValidSkillName(name: string): boolean {
+      return SAFE_SKILL_NAME_RE.test(name) && !name.includes('..');
+    }
+
+    function isPathContained(baseDir: string, userPath: string): boolean {
+      const resolved = resolve(baseDir, userPath);
+      const safe = resolve(baseDir);
+      return resolved === safe || resolved.startsWith(safe + '/');
+    }
+
     // Route: GET /api/v1/skills?agent={name}
     if (req.url?.startsWith('/api/v1/skills') && req.method === 'GET' && !req.url.startsWith('/api/v1/skills/')) {
       try {
@@ -952,6 +964,11 @@ export function createApiServer(deliverer: AgentRouter, options: ServerOptions):
           return;
         }
 
+        if (!isValidSkillName(request.skill.name)) {
+          sendError(res, 400, 'Invalid skill name');
+          return;
+        }
+
         const workingDir = resolveAgentWorkingDir(request.agent || null, options, res);
         if (!workingDir) return;
 
@@ -960,6 +977,14 @@ export function createApiServer(deliverer: AgentRouter, options: ServerOptions):
           res.writeHead(409, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'skill already exists' }));
           return;
+        }
+
+        // Validate all file paths before writing anything
+        for (const relativePath of Object.keys(request.skill.files)) {
+          if (!isPathContained(skillDir, relativePath)) {
+            sendError(res, 400, `Invalid file path: ${relativePath}`);
+            return;
+          }
         }
 
         fs.mkdirSync(skillDir, { recursive: true });
@@ -989,6 +1014,11 @@ export function createApiServer(deliverer: AgentRouter, options: ServerOptions):
         }
 
         const skillName = decodeURIComponent(skillDeleteMatch[1]);
+        if (!isValidSkillName(skillName)) {
+          sendError(res, 400, 'Invalid skill name');
+          return;
+        }
+
         const url = new URL(req.url!, `http://${req.headers.host}`);
         const agentName = url.searchParams.get('agent');
         const workingDir = resolveAgentWorkingDir(agentName, options, res);
