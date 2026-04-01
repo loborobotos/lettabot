@@ -30,6 +30,7 @@ import { createLogger } from '../logger.js';
 const log = createLogger('API');
 const VALID_CHANNELS: ChannelId[] = ['telegram', 'slack', 'discord', 'whatsapp', 'signal'];
 const MAX_BODY_SIZE = 10 * 1024; // 10KB
+const MAX_SKILL_BODY_SIZE = 1024 * 1024; // 1MB — skills contain file contents
 const MAX_TEXT_LENGTH = 10000; // 10k chars
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const WEBHOOK_CONTEXT = { type: 'webhook' as const, outputMode: 'silent' as const };
@@ -950,7 +951,7 @@ export function createApiServer(deliverer: AgentRouter, options: ServerOptions):
           return;
         }
 
-        const body = await readBody(req, MAX_BODY_SIZE);
+        const body = await readBody(req, MAX_SKILL_BODY_SIZE);
         let request: { agent?: string; skill?: { name: string; files: Record<string, string> } };
         try {
           request = JSON.parse(body);
