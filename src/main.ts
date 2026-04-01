@@ -606,6 +606,12 @@ async function main() {
     agentChannels: agentChannelMap,
     agentConversationModes,
     sessionInvalidators,
+    agents: agents.map(a => ({
+      name: a.name,
+      workingDir: a.workingDir
+        ? resolveWorkingDirPath(a.workingDir)
+        : globalConfig.workingDir,
+    })),
   });
   
   // Startup banner

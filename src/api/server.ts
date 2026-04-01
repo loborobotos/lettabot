@@ -7,7 +7,10 @@ import * as http from 'http';
 import * as fs from 'fs';
 import { readFile } from 'node:fs/promises';
 import * as crypto from 'node:crypto';
+import { join } from 'node:path';
 import { validateApiKey } from './auth.js';
+import { loadSkillsFromDir } from '../skills/loader.js';
+import { resolveWorkingDirPath } from '../utils/paths.js';
 import type { SendMessageResponse, ChatRequest, ChatResponse, AsyncChatResponse, PairingListResponse, PairingApproveRequest, PairingApproveResponse } from './types.js';
 import { listPairingRequests, approvePairingCode } from '../pairing/store.js';
 import { parseMultipart } from './multipart.js';
@@ -48,6 +51,7 @@ interface ServerOptions {
   agentChannels?: Map<string, string[]>; // Channel IDs per agent name
   agentConversationModes?: Map<string, string>; // agentName -> conversationMode (shared|per-channel|per-chat|disabled)
   sessionInvalidators?: Map<string, (key?: string) => void>; // Invalidate live sessions after store writes
+  agents?: Array<{ name: string; workingDir?: string }>; // Agent configs for skills API
 }
 
 /**
@@ -207,7 +211,7 @@ export function createApiServer(deliverer: AgentRouter, options: ServerOptions):
     // Set CORS headers (configurable origin, defaults to same-origin for security)
     const corsOrigin = options.corsOrigin || req.headers.origin || 'null';
     res.setHeader('Access-Control-Allow-Origin', corsOrigin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Api-Key, Authorization');
 
     // Handle OPTIONS preflight
@@ -874,6 +878,137 @@ export function createApiServer(deliverer: AgentRouter, options: ServerOptions):
       const modeScript = `<script>window.__PORTAL_MODE__ = '${portalMode}';</script>`;
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(PORTAL_HTML.replace('</head>', modeScript + '</head>'));
+      return;
+    }
+
+    // ── Skills API ─────────────────────────────────────────────────────────
+
+    function resolveAgentWorkingDir(
+      agentName: string | null,
+      opts: ServerOptions,
+      response: http.ServerResponse,
+    ): string | null {
+      if (!opts.agents || opts.agents.length === 0) {
+        sendError(response, 500, 'No agents configured');
+        return null;
+      }
+      const name = agentName || opts.agents[0].name;
+      const agent = opts.agents.find(a => a.name === name);
+      if (!agent) {
+        sendError(response, 404, `Agent not found: ${name}`);
+        return null;
+      }
+      const raw = agent.workingDir;
+      if (!raw) {
+        sendError(response, 500, `Agent "${name}" has no workingDir configured`);
+        return null;
+      }
+      return raw.startsWith('~') ? resolveWorkingDirPath(raw) : raw;
+    }
+
+    // Route: GET /api/v1/skills?agent={name}
+    if (req.url?.startsWith('/api/v1/skills') && req.method === 'GET' && !req.url.startsWith('/api/v1/skills/')) {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const agentName = url.searchParams.get('agent');
+        const workingDir = resolveAgentWorkingDir(agentName, options, res);
+        if (!workingDir) return;
+
+        const skillsDir = join(workingDir, '.skills');
+        const skills = loadSkillsFromDir(skillsDir).map(s => ({
+          name: s.name,
+          description: s.description,
+          source: 'installed' as const,
+        }));
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ skills }));
+      } catch (error: any) {
+        log.error('Skills list error:', error);
+        sendError(res, 500, error.message || 'Internal server error');
+      }
+      return;
+    }
+
+    // Route: POST /api/v1/skills/install
+    if (req.url === '/api/v1/skills/install' && req.method === 'POST') {
+      try {
+        if (!validateApiKey(req.headers, options.apiKey)) {
+          sendError(res, 401, 'Unauthorized');
+          return;
+        }
+
+        const body = await readBody(req, MAX_BODY_SIZE);
+        let request: { agent?: string; skill?: { name: string; files: Record<string, string> } };
+        try {
+          request = JSON.parse(body);
+        } catch {
+          sendError(res, 400, 'Invalid JSON body');
+          return;
+        }
+
+        if (!request.skill || !request.skill.name || !request.skill.files) {
+          sendError(res, 400, 'Missing required fields: skill.name, skill.files');
+          return;
+        }
+
+        const workingDir = resolveAgentWorkingDir(request.agent || null, options, res);
+        if (!workingDir) return;
+
+        const skillDir = join(workingDir, '.skills', request.skill.name);
+        if (fs.existsSync(skillDir)) {
+          res.writeHead(409, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'skill already exists' }));
+          return;
+        }
+
+        fs.mkdirSync(skillDir, { recursive: true });
+        for (const [relativePath, content] of Object.entries(request.skill.files)) {
+          const filePath = join(skillDir, relativePath);
+          const fileDir = join(filePath, '..');
+          fs.mkdirSync(fileDir, { recursive: true });
+          fs.writeFileSync(filePath, content, 'utf-8');
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, name: request.skill.name }));
+      } catch (error: any) {
+        log.error('Skills install error:', error);
+        sendError(res, 500, error.message || 'Internal server error');
+      }
+      return;
+    }
+
+    // Route: DELETE /api/v1/skills/:name?agent={name}
+    const skillDeleteMatch = req.url?.match(/^\/api\/v1\/skills\/([^?/]+)/);
+    if (skillDeleteMatch && req.method === 'DELETE') {
+      try {
+        if (!validateApiKey(req.headers, options.apiKey)) {
+          sendError(res, 401, 'Unauthorized');
+          return;
+        }
+
+        const skillName = decodeURIComponent(skillDeleteMatch[1]);
+        const url = new URL(req.url!, `http://${req.headers.host}`);
+        const agentName = url.searchParams.get('agent');
+        const workingDir = resolveAgentWorkingDir(agentName, options, res);
+        if (!workingDir) return;
+
+        const skillDir = join(workingDir, '.skills', skillName);
+        if (!fs.existsSync(skillDir)) {
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'skill not found' }));
+          return;
+        }
+
+        fs.rmSync(skillDir, { recursive: true, force: true });
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (error: any) {
+        log.error('Skills delete error:', error);
+        sendError(res, 500, error.message || 'Internal server error');
+      }
       return;
     }
 
