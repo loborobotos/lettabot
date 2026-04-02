@@ -30,29 +30,6 @@ RUN for cmd in crontab cron systemctl systemd at atd; do \
         > /usr/local/bin/$cmd && chmod +x /usr/local/bin/$cmd; \
     done
 
-# Install Railway CLI v4.33.0 via direct tarball (bypasses install script GitHub API call).
-# Binary is renamed to railway-bin; a wrapper script gates access by checking
-# $AGENT_ID against $RAILWAY_ALLOWED_AGENTS CSV list.
-ARG RAILWAY_VERSION=4.33.0
-RUN curl -fsSL "https://github.com/railwayapp/cli/releases/download/v${RAILWAY_VERSION}/railway-v${RAILWAY_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
-      | tar -xz -C /usr/local/bin \
-    && mv /usr/local/bin/railway /usr/local/bin/railway-bin \
-    && printf '#!/bin/sh\n\
-if [ -z "$AGENT_ID" ]; then\n\
-  echo "ERROR: AGENT_ID not set. Cannot verify authorization." >&2\n\
-  exit 1\n\
-fi\n\
-if [ -z "$RAILWAY_ALLOWED_AGENTS" ]; then\n\
-  echo "ERROR: RAILWAY_ALLOWED_AGENTS not set. No agents are authorized." >&2\n\
-  exit 1\n\
-fi\n\
-case ",$RAILWAY_ALLOWED_AGENTS," in\n\
-  *",$AGENT_ID,"*) ;;\n\
-  *) echo "ERROR: Agent $AGENT_ID is not authorized to use Railway CLI." >&2; exit 1 ;;\n\
-esac\n\
-exec railway-bin "$@"\n' > /usr/local/bin/railway \
-    && chmod +x /usr/local/bin/railway
-
 ENV NODE_ENV=production
 EXPOSE 8080
 
